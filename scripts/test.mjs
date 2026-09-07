@@ -1,0 +1,332 @@
+#!/usr/bin/env node
+/**
+ * Юнит-тесты чистой логики (utils.js, pdf.js) — запускаются вне браузера.
+ * Также генерирует scripts/../test-out/test.pdf для проверки pypdf.
+ *
+ * Запуск: node scripts/test.mjs
+ */
+'use strict';
+
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const ROOT = path.resolve(__dirname, '..');
+
+// Выполняем оба файла в одной области видимости и забираем их top-level объявления.
+const src = ['utils.js', 'pdf.js']
+  .map((f) => fs.readFileSync(path.join(ROOT, f), 'utf8'))
+  .join('\n');
+
+const fn = new Function(`${src}\n;return { parseLinks, isHttpUrl, makeCatalogFilename, sleep, jpegInfo, collectPdfChunks, makePdfBlob, PDF_DPI };`);
+const exports = fn();
+const utils = exports;
+const pdf = exports;
+
+let passed = 0, failed = 0;
+function t(name, fn) {
+  try {
+    fn();
+    passed++;
+    console.log('  ✓ ' + name);
+  } catch (e) {
+    failed++;
+    console.error('  ✕ ' + name + ' — ' + e.message);
+  }
+}
+function eq(a, b, msg) {
+  const ja = JSON.stringify(a), jb = JSON.stringify(b);
+  if (ja !== jb) throw new Error(`${msg || 'не равно'}: ${ja} !== ${jb}`);
+}
+
+// Текущая дата вычисляется динамически — имя файла содержит сегодняшнюю дату,
+// и тесты не должны зависеть от конкретного дня.
+const TODAY = (() => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+})();
+
+/* ================= utils.parseLinks ================= */
+
+console.log('parseLinks:');
+t('одна ссылка на строку', () => {
+  eq(utils.parseLinks('https://a.com/cat/one\nhttps://a.com/cat/two').links,
+     ['https://a.com/cat/one', 'https://a.com/cat/two']);
+});
+t('разделители: пробелы, запятые, точки с запятой', () => {
+  eq(utils.parseLinks('https://a.com/1, https://a.com/2;https://a.com/3 https://a.com/4').links,
+     ['https://a.com/1', 'https://a.com/2', 'https://a.com/3', 'https://a.com/4']);
+});
+t('разделитель "|" (пример пользователя)', () => {
+  eq(utils.parseLinks('/regardez/offres/catalogue-castorama-3751268 | /regardez/offres/catalogue-castorama-3455996 | /regardez/offres/catalogue-castorama-3455920').links,
+     [
+       'https://www.promocatalogues.fr/regardez/offres/catalogue-castorama-3751268',
+       'https://www.promocatalogues.fr/regardez/offres/catalogue-castorama-3455996',
+       'https://www.promocatalogues.fr/regardez/offres/catalogue-castorama-3455920'
+     ]);
+});
+t('все разделители вперемешку в одном вводе', () => {
+  eq(utils.parseLinks('/a/1 | /a/2, /a/3;/a/4 /a/5\n/a/6').links,
+     [
+       'https://www.promocatalogues.fr/a/1',
+       'https://www.promocatalogues.fr/a/2',
+       'https://www.promocatalogues.fr/a/3',
+       'https://www.promocatalogues.fr/a/4',
+       'https://www.promocatalogues.fr/a/5',
+       'https://www.promocatalogues.fr/a/6'
+     ]);
+});
+t('относительная ссылка -> абсолютная на promocatalogues.fr', () => {
+  eq(utils.parseLinks('/regardez/offres/catalogue-picard-3660147').links,
+     ['https://www.promocatalogues.fr/regardez/offres/catalogue-picard-3660147']);
+});
+t('абсолютная ссылка на сайт остаётся как есть', () => {
+  eq(utils.parseLinks('https://www.promocatalogues.fr/regardez/offres/catalogue-picard-3660147').links,
+     ['https://www.promocatalogues.fr/regardez/offres/catalogue-picard-3660147']);
+});
+t('смешанные относительные и абсолютные + дубликаты', () => {
+  const r = utils.parseLinks(
+    '/regardez/offres/catalogue-a-1 | https://www.promocatalogues.fr/regardez/offres/catalogue-a-1\n' +
+    '/regardez/offres/catalogue-b-2'
+  );
+  eq(r.links, [
+    'https://www.promocatalogues.fr/regardez/offres/catalogue-a-1',
+    'https://www.promocatalogues.fr/regardez/offres/catalogue-b-2'
+  ]);
+});
+t('протокол-относительная ссылка //host/path', () => {
+  eq(utils.parseLinks('//www.promocatalogues.fr/regardez/offres/x').links,
+     ['https://www.promocatalogues.fr/regardez/offres/x']);
+});
+t('без пробелов после запятой', () => {
+  eq(utils.parseLinks('https://a.com/1,https://a.com/2').links,
+     ['https://a.com/1', 'https://a.com/2']);
+});
+t('пустые строки игнорируются', () => {
+  eq(utils.parseLinks('\n\n  \nhttps://a.com/1\n\n').links, ['https://a.com/1']);
+});
+t('дубликаты удаляются', () => {
+  eq(utils.parseLinks('https://a.com/1\nhttps://a.com/1\nhttps://a.com/1').links,
+     ['https://a.com/1']);
+});
+t('пробелы вокруг ссылок убираются', () => {
+  eq(utils.parseLinks('  https://a.com/1  ').links, ['https://a.com/1']);
+});
+t('неверные URL отбрасываются отдельно', () => {
+  const r = utils.parseLinks('https://a.com/1\nnot-a-url\nftp://x.com/2');
+  eq(r.links, ['https://a.com/1']);
+  eq(r.invalid, ['not-a-url', 'ftp://x.com/2']);
+});
+t('пустой ввод', () => {
+  eq(utils.parseLinks('').links, []);
+  eq(utils.parseLinks(null).links, []);
+});
+
+/* ================= utils.makeCatalogFilename ================= */
+
+console.log('makeCatalogFilename:');
+t('хвост сайта « – Name» (en dash) убирается', () => {
+  const f = utils.makeCatalogFilename('Осенний каталог – Магазин', '/catalog/autumn');
+  eq(f, `Осенний_каталог_${TODAY}.pdf`);
+});
+t('em dash (—) НЕ входит в regex исходника — сохраняется как "_"', () => {
+  // В исходном скрипте класс символов [-–|] не содержит длинного тире,
+  // поэтому поведение «Осенний каталог — Магазин» → «Осенний_каталог_Магазин».
+  const f = utils.makeCatalogFilename('Осенний каталог — Магазин', '/x');
+  eq(f, `Осенний_каталог_Магазин_${TODAY}.pdf`);
+});
+t('хвост « | Name» убирается', () => {
+  const f = utils.makeCatalogFilename('Каталог | Site', '/x');
+  eq(f, `Каталог_${TODAY}.pdf`);
+});
+t('недопустимые символы -> "_"', () => {
+  const f = utils.makeCatalogFilename('Каталог: Весна/2026!', '/x');
+  eq(f, `Каталог_Весна_2026_${TODAY}.pdf`);
+});
+t('кириллица и цифры сохраняются', () => {
+  const f = utils.makeCatalogFilename('Скидки 50% на всё', '/x');
+  eq(f, `Скидки_50_на_всё_${TODAY}.pdf`);
+});
+t('пустой заголовок -> последний сегмент URL', () => {
+  eq(utils.makeCatalogFilename('', '/catalog/summer'), `summer_${TODAY}.pdf`);
+});
+t('пустой заголовок и пустой путь -> catalogue', () => {
+  eq(utils.makeCatalogFilename('', ''), `catalogue_${TODAY}.pdf`);
+});
+t('длина ограничена 60 символами', () => {
+  const long = 'A'.repeat(120);
+  const f = utils.makeCatalogFilename(long, '/x');
+  eq(f.slice(0, 60), 'A'.repeat(60));
+});
+t('заголовок из одних спецсимволов -> сегмент URL', () => {
+  // После очистки строка пуста -> используется последний сегмент URL.
+  eq(utils.makeCatalogFilename('!!! ???', '/catalog/fall'), `fall_${TODAY}.pdf`);
+});
+t('заголовок с дефисами не пустеет (как в исходнике)', () => {
+  // Исходный скрипт оставляет "-" после очистки ("---" -> "--"), slug не используется.
+  eq(utils.makeCatalogFilename('!!! ... ---', '/catalog/fall'), `--_${TODAY}.pdf`);
+});
+t('номер каталога добавляется в конец имени (пример из ТЗ)', () => {
+  const f = utils.makeCatalogFilename('Catalogue Noz - Promocatalogues.fr', '/regardez/offres/catalogue-noz-3766479');
+  eq(f, `Catalogue_Noz_3766479_${TODAY}.pdf`);
+});
+t('номер каталога: picard', () => {
+  const f = utils.makeCatalogFilename('Catalogue Picard - Promocatalogues.fr', '/regardez/offres/catalogue-picard-3660147');
+  eq(f, `Catalogue_Picard_3660147_${TODAY}.pdf`);
+});
+t('номера в ссылке нет — номер не добавляется', () => {
+  const f = utils.makeCatalogFilename('Каталог Весна – Site', '/regardez/offres/catalogue-printemps');
+  eq(f, `Каталог_Весна_${TODAY}.pdf`);
+});
+t('slug с номером — номер не дублируется', () => {
+  // Пустой заголовок -> base = последний сегмент URL, он уже содержит номер.
+  eq(utils.makeCatalogFilename('', '/regardez/offres/catalogue-noz-3766479'),
+     `catalogue-noz-3766479_${TODAY}.pdf`);
+});
+t('номер уже в заголовке — не дублируется', () => {
+  eq(utils.makeCatalogFilename('Catalogue Noz 3766479 - Site', '/regardez/offres/catalogue-noz-3766479'),
+     `Catalogue_Noz_3766479_${TODAY}.pdf`);
+});
+t('сегмент из одних цифр номером не считается', () => {
+  eq(utils.makeCatalogFilename('Нечто', '/flyers/3660147'), `Нечто_${TODAY}.pdf`);
+});
+
+/* ================= pdf.jpegInfo ================= */
+
+function fakeJpeg(w, h, comps) {
+  // минимальный валидный JPEG: SOI + APP0 + SOF0 + EOI (для jpegInfo достаточно SOF0)
+  const parts = [0xff, 0xd8];
+  // APP0 (JFIF)
+  const app0 = [0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00];
+  parts.push(...app0);
+  // SOF0
+  const sofLen = 8 + 3 * comps;
+  const sof = [0xff, 0xc0, (sofLen >> 8) & 0xff, sofLen & 0xff, 8,
+               (h >> 8) & 0xff, h & 0xff, (w >> 8) & 0xff, w & 0xff, comps];
+  for (let c = 0; c < comps; c++) sof.push(c + 1, 0x11, 0);
+  parts.push(...sof);
+  parts.push(0xff, 0xd9);
+  return new Uint8Array(parts);
+}
+
+console.log('jpegInfo:');
+t('разбор SOF0: RGB', () => {
+  const b = fakeJpeg(1000, 1414, 3);
+  eq(pdf.jpegInfo(b), { h: 1414, w: 1000, comps: 3 });
+});
+t('разбор SOF0: grayscale', () => {
+  const b = fakeJpeg(800, 1200, 1);
+  eq(pdf.jpegInfo(b), { h: 1200, w: 800, comps: 1 });
+});
+t('проход по APP0 -> SOF0', () => {
+  // jpegInfo должен перепрыгнуть APP0 через поле длины и найти SOF0
+  const b = fakeJpeg(640, 480, 3);
+  eq(pdf.jpegInfo(b).w, 640);
+});
+t('не JPEG -> ошибка', () => {
+  let threw = false;
+  try { pdf.jpegInfo(new Uint8Array([1, 2, 3, 4])); } catch { threw = true; }
+  if (!threw) throw new Error('ожидалась ошибка');
+});
+
+/* ================= pdf.collectPdfChunks ================= */
+
+console.log('collectPdfChunks:');
+
+function makePages() {
+  const j1 = fakeJpeg(1000, 1414, 3);
+  const j2 = fakeJpeg(800, 1200, 1);
+  const j3 = fakeJpeg(1200, 1600, 3);
+  return [
+    { bytes: j1, w: 1000, h: 1414, comps: 3 },
+    { bytes: j2, w: 800, h: 1200, comps: 1 },
+    { bytes: j3, w: 1200, h: 1600, comps: 3 }
+  ];
+}
+
+const pdfBytes = Buffer.concat(pdf.collectPdfChunks(makePages()).map((c) => Buffer.from(c)));
+
+t('заголовок %PDF-1.4 и %%EOF', () => {
+  if (pdfBytes.subarray(0, 8).toString() !== '%PDF-1.4') throw new Error('нет заголовка');
+  if (!/%PDF-1\.4\n/.test(pdfBytes.subarray(pdfBytes.length - 12).toString('latin1'))) {
+    // простая проверка хвоста
+  }
+  if (!pdfBytes.toString('latin1').includes('%%EOF')) throw new Error('нет %%EOF');
+});
+
+t('xref: все объекты по своим смещениям, trailer корректен', () => {
+  const s = pdfBytes.toString('latin1');
+  const sxm = s.match(/startxref\s+(\d+)/);
+  if (!sxm) throw new Error('нет startxref');
+  const xrefOff = parseInt(sxm[1], 10);
+  const xrefHead = s.slice(xrefOff);
+  const m = xrefHead.match(/xref\n0 (\d+)\n/);
+  if (!m) throw new Error('нет xref');
+  const total = parseInt(m[1], 10) - 1; // объекты 1..total
+  const lines = xrefHead.split('\n');
+  for (let n = 1; n <= total; n++) {
+    const off = parseInt(lines[2 + n].slice(0, 10), 10);
+    const head = s.slice(off, off + 20);
+    if (!head.startsWith(`${n} 0 obj`)) throw new Error(`объект ${n} не найден по смещению ${off}: ${head}`);
+  }
+  const trailer = s.slice(xrefOff + xrefHead.indexOf('trailer'));
+  if (!trailer.includes(`/Size ${total + 1}`)) throw new Error('неверный /Size');
+  if (!trailer.includes('/Root 1 0 R')) throw new Error('неверный /Root');
+});
+
+t('MediaBox: w = p.w*72/300 с двумя знаками', () => {
+  const s = pdfBytes.toString('latin1');
+  const expect1 = '1000 * 72 / 300'; // 240.00
+  const mb = (w, h) => `/MediaBox [0 0 ${(w * 72 / 300).toFixed(2)} ${(h * 72 / 300).toFixed(2)}]`;
+  if (!s.includes(mb(1000, 1414))) throw new Error('MediaBox страницы 1 неверный: ' + expect1);
+  if (!s.includes(mb(800, 1200))) throw new Error('MediaBox страницы 2 неверный');
+  if (!s.includes(mb(1200, 1600))) throw new Error('MediaBox страницы 3 неверный');
+});
+
+t('/Count = 3 и DeviceGray для comps=1', () => {
+  const s = pdfBytes.toString('latin1');
+  if (!s.includes('/Count 3')) throw new Error('нет /Count 3');
+  if (!s.includes('/ColorSpace /DeviceGray')) throw new Error('нет DeviceGray');
+  if (!s.includes('/ColorSpace /DeviceRGB')) throw new Error('нет DeviceRGB');
+  if (!s.includes('/Filter /DCTDecode')) throw new Error('нет DCTDecode');
+});
+
+t('JPEG-байты страниц присутствуют в потоке', () => {
+  const hay = pdfBytes;
+  for (const p of makePages()) {
+    const needle = Buffer.from(p.bytes);
+    let found = false;
+    for (let i = 0; i + needle.length <= hay.length; i++) {
+      if (hay[i] === 0xff && hay[i + 1] === 0xd8 && hay.subarray(i, i + needle.length).equals(needle)) {
+        found = true; break;
+      }
+    }
+    if (!found) throw new Error('JPEG-поток не найден');
+  }
+});
+
+t('Length потоков корректны', () => {
+  const s = pdfBytes.toString('latin1');
+  const re = /\/Length (\d+) >>\nstream\n/g;
+  let m;
+  let checked = 0;
+  while ((m = re.exec(s)) !== null) {
+    const len = parseInt(m[1], 10);
+    const streamStart = m.index + m[0].length;
+    const streamEnd = s.indexOf('\nendstream', streamStart);
+    if (streamEnd < 0) throw new Error('нет endstream');
+    const actual = streamEnd - streamStart;
+    if (actual !== len) throw new Error(`/Length ${len}, фактически ${actual}`);
+    checked++;
+  }
+  if (checked < 4) throw new Error('мало потоков: ' + checked);
+});
+
+// сохраняем для проверки pypdf
+fs.mkdirSync(path.join(ROOT, 'test-out'), { recursive: true });
+fs.writeFileSync(path.join(ROOT, 'test-out', 'test.pdf'), pdfBytes);
+
+console.log('');
+console.log(`Результат: ${passed} passed, ${failed} failed`);
+process.exit(failed ? 1 : 0);

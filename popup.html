@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>Скачать каталоги</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+
+  <header>
+    <div class="h-main">
+      <h1>Скачать каталоги</h1>
+      <p class="sub">Страницы каталога → полноразмерные изображения → один PDF</p>
+    </div>
+    <button id="gear" class="gear" type="button" title="Настройки">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+        stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="3"></circle>
+        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+      </svg>
+    </button>
+  </header>
+
+  <main id="main">
+    <label class="lbl" for="urls">Ссылки на каталоги promocatalogues.fr — по одной на строку</label>
+    <textarea id="urls" rows="8" spellcheck="false"
+      placeholder="/regardez/offres/catalogue-picard-3660147&#10;/regardez/offres/catalogue-castorama-3751268&#10;/regardez/offres/catalogue-la-redoute-3763748"></textarea>
+    <div class="count-row"><span id="count" class="muted">Ссылок пока нет</span></div>
+
+    <div class="actions">
+      <button id="start" class="primary" disabled>Скачать каталоги</button>
+      <button id="stop" disabled>Остановить</button>
+    </div>
+
+    <label class="chk" title="Помогает, если сайт не показывает панель миниатюр в фоновой вкладке">
+      <input type="checkbox" id="activeTab">
+      <span>Открывать вкладки каталога на переднем плане</span>
+    </label>
+
+    <section id="status" class="hidden">
+      <div class="cap" id="cap"></div>
+      <div class="stage" id="stage"></div>
+      <div class="elapsed muted" id="elapsed"></div>
+      <div class="bar"><div class="fill" id="fill"></div></div>
+      <ul id="list"></ul>
+      <div id="summary" class="summary hidden"></div>
+    </section>
+  </main>
+
+  <section id="settings" class="hidden">
+    <div class="set-top">
+      <button id="setBack" class="linklike" type="button">← Назад</button>
+      <span class="set-title">Настройки</span>
+    </div>
+    <div id="setFields"></div>
+    <div class="set-actions">
+      <button id="setReset" class="linklike" type="button">Сбросить к значениям по умолчанию</button>
+      <button id="setSave" class="primary" type="button">Сохранить</button>
+    </div>
+    <div id="setStatus" class="muted"></div>
+    <p class="muted set-note">Изменения применяются к новым ссылкам в очереди
+      (включая повторные попытки).</p>
+  </section>
+
+  <footer class="muted">
+    <div>Относительные ссылки дополняются до https://www.promocatalogues.fr
+      (разделители: строка, пробел, запятая, «;», «|» — можно смешивать).
+      Каталоги обрабатываются строго по очереди. Окно можно закрыть — загрузка продолжится.</div>
+    <div class="foot-row">
+      <span>v<span id="ver"></span></span>
+      <button id="logBtn" class="linklike" title="Скопировать журнал событий в буфер обмена">Копировать журнал</button>
+    </div>
+  </footer>
+
+  <script src="utils.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>
