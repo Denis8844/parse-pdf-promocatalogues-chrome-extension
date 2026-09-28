@@ -269,8 +269,9 @@ function renderLinkItem(link, i) {
   body.appendChild(url);
 
   // Дата действия каталога («Valable: 25 sept. au 12 oct.») — у каталогов,
-  // развёрнутых из ссылки-списка; после скачивания дата уже в имени файла.
-  if (link.dateText && link.status !== 'done') {
+  // развёрнутых из ссылки-списка; показывается всегда, в любом статусе
+  // (и во время загрузки, и после завершения).
+  if (link.dateText) {
     const d = document.createElement('div');
     d.className = 'date';
     d.textContent = link.dateText;
