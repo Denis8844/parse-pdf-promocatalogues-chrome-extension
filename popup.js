@@ -141,6 +141,32 @@ function refreshCount() {
   elStart.disabled = !links.length || (run && run.state === 'running');
 }
 
+/* ================= Черновик списка ссылок ================= */
+
+// Popup уничтожается при закрытии — вместе с содержимым textarea. Чтобы вставленные
+// ссылки не пропадали, сохраняем их в chrome.storage.local (с дебаунсом на ввод,
+// чтобы не писать в хранилище на каждое нажатие клавиши) и восстанавливаем
+// при следующем открытии: список можно дополнять по одной ссылке.
+const DRAFT_KEY = 'urlsDraft';
+let draftSaveTimer = null;
+
+function saveUrlsDraft() {
+  chrome.storage.local.set({ [DRAFT_KEY]: elUrls.value }).catch(() => {});
+}
+
+function scheduleUrlsDraftSave() {
+  if (draftSaveTimer) clearTimeout(draftSaveTimer);
+  draftSaveTimer = setTimeout(() => {
+    draftSaveTimer = null;
+    saveUrlsDraft();
+  }, 300);
+}
+
+function onUrlsInput() {
+  refreshCount();
+  scheduleUrlsDraftSave();
+}
+
 /* ================= Рендер состояния ================= */
 
 function render() {
@@ -582,6 +608,13 @@ async function init() {
     chrome.storage.local.set({ activeTab: elActiveTab.checked }).catch(() => {});
   });
 
+  // Черновик ссылок из прошлого открытия окна: список не сбрасывается,
+  // его можно дополнить новыми ссылками
+  try {
+    const { urlsDraft } = await chrome.storage.local.get(DRAFT_KEY);
+    if (typeof urlsDraft === 'string' && urlsDraft) elUrls.value = urlsDraft;
+  } catch { /* ignore */ }
+
   // Текущее состояние очереди
   const st = await sendMessage({ type: 'GET_STATE' });
   if (st && st.run) { run = st.run; render(); }
@@ -592,7 +625,7 @@ async function init() {
   } catch { /* ignore */ }
 
   // События
-  elUrls.addEventListener('input', refreshCount);
+  elUrls.addEventListener('input', onUrlsInput);
   elStart.addEventListener('click', onStart);
   elStop.addEventListener('click', onStop);
   elLogBtn.addEventListener('click', onCopyLog);
@@ -602,6 +635,13 @@ async function init() {
   elSetReset.addEventListener('click', resetSettings);
   elUrls.addEventListener('keydown', (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') onStart();
+  });
+
+  // При закрытии окна сохраняем черновик немедленно (pagehide успевает сработать
+  // раньше смерти popup — на случай, если debounce ещё не сработал)
+  window.addEventListener('pagehide', () => {
+    if (draftSaveTimer) { clearTimeout(draftSaveTimer); draftSaveTimer = null; }
+    saveUrlsDraft();
   });
 
   // Таймер «прошло/обработка» — обновляется каждую секунду
