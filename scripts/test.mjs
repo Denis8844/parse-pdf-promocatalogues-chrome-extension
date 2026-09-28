@@ -19,7 +19,7 @@ const src = ['utils.js', 'pdf.js']
   .map((f) => fs.readFileSync(path.join(ROOT, f), 'utf8'))
   .join('\n');
 
-const fn = new Function(`${src}\n;return { parseLinks, isHttpUrl, makeCatalogFilename, sleep, jpegInfo, collectPdfChunks, makePdfBlob, PDF_DPI, isListingUrl, parseFrenchDateRange, validitySuffix };`);
+const fn = new Function(`${src}\n;return { parseLinks, isHttpUrl, makeCatalogFilename, sleep, jpegInfo, collectPdfChunks, makePdfBlob, PDF_DPI, isListingUrl, parseFrenchDateRange, validitySuffix, progressCaption, catalogProgress };`);
 const exports = fn();
 const utils = exports;
 const pdf = exports;
@@ -303,6 +303,58 @@ t('чужой домен — не список', () => {
 });
 
 /* ================= Настройки background.js / popup.js ================= */
+
+/* ================= Прогресс очереди: магазины и каталоги ================= */
+
+console.log('прогресс очереди (магазины/каталоги):');
+{
+  const S1 = 'https://www.promocatalogues.fr/magasins/carrefour/catalogues-promotions';
+  const S2 = 'https://www.promocatalogues.fr/magasins/aldi/catalogues-promotions';
+  const C = (n, from) => ({
+    url: 'https://www.promocatalogues.fr/regardez/offres/catalogue-x-' + n,
+    fromListing: from || null
+  });
+  const L = (u) => ({ url: u });
+
+  t('каталоги первого магазина: позиция внутри магазина и всего', () => {
+    const links = [C(1, S1), C(2, S1), C(3, S1), L(S2)];
+    eq(utils.progressCaption(links, 1), 'Магазин 1 из 2 · Каталоги 2 из 3 · Всего 2 из 3');
+    eq(utils.progressCaption(links, 2), 'Магазин 1 из 2 · Каталоги 3 из 3 · Всего 3 из 3');
+  });
+
+  t('второй магазин: счётчик магазинов растёт, «всего» — по всем каталогам', () => {
+    const links = [C(1, S1), C(2, S1), C(3, S1), C(4, S2), C(5, S2)];
+    eq(utils.progressCaption(links, 3), 'Магазин 2 из 2 · Каталоги 1 из 2 · Всего 4 из 5');
+  });
+
+  t('идёт сбор списка магазина', () => {
+    const links = [C(1, S1), L(S2)];
+    eq(utils.progressCaption(links, 1), 'Магазин 2 из 2 · Каталоги: собираю список · Всего 1 из 1');
+  });
+
+  t('самый первый магазин, каталогов в очереди ещё нет', () => {
+    const links = [L(S1), L(S2)];
+    eq(utils.progressCaption(links, 0), 'Магазин 1 из 2 · Каталоги: собираю список · Всего 0 из 0');
+  });
+
+  t('пропущенный магазин (0 активных каталогов) всё равно считается магазином', () => {
+    // S1 осталась в очереди как skipped, S2 развёрнута в каталоги
+    const links = [L(S1), C(4, S2), C(5, S2)];
+    eq(utils.progressCaption(links, 1), 'Магазин 2 из 2 · Каталоги 1 из 2 · Всего 1 из 2');
+  });
+
+  t('ручные каталоги без магазинов — формат как раньше', () => {
+    const links = [C(1), C(2), C(3)];
+    eq(utils.progressCaption(links, 1), 'Каталог 2 из 3');
+  });
+
+  t('catalogProgress: ссылки-списки не считаются каталогами', () => {
+    const links = [L(S1), C(1, S1), C(2, S1), L(S2), C(3, S2)];
+    eq(JSON.stringify(utils.catalogProgress(links, 0)), '{"pos":0,"total":3}');
+    eq(JSON.stringify(utils.catalogProgress(links, 1)), '{"pos":1,"total":3}');
+    eq(JSON.stringify(utils.catalogProgress(links, 3)), '{"pos":2,"total":3}');
+  });
+}
 
 console.log('настройки (DEFAULTS/CLAMP/UI):');
 t('каждый ключ DEFAULTS реально используется в коде (нет «мёртвых» настроек)', () => {

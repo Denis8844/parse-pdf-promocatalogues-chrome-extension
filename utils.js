@@ -187,6 +187,86 @@ function isListingUrl(url) {
   }
 }
 
+/* ================= Прогресс очереди: магазины и каталоги ================= */
+
+/**
+ * Разложение прогресса очереди для заголовка popup.
+ *
+ * Ссылка-список (/magasins/…) после сбора заменяется в очереди своими
+ * каталогами (у каждого есть fromListing — url страницы магазина), поэтому
+ * «магазинами» считаем: ссылки-списки, ещё оставшиеся в очереди (в том числе
+ * пропущенные/ошибочные), плюс уникальные fromListing у каталогов.
+ *
+ * Возвращает строку вида
+ *   «Магазин 1 из 3 · Каталоги 2 из 12 · Всего 15 из 34»
+ * где «Каталоги» — прогресс внутри текущего магазина, «Всего» — суммарный
+ * счётчик всех каталогов в очереди. Частные случаи:
+ *   - идёт сбор списка: «Магазин 2 из 3 · Каталоги: собираю список · Всего …»
+ *   - ссылка вставлена вручную (без fromListing): «Каталог 15 из 34»
+ */
+function progressCaption(links, cur) {
+  const list = Array.isArray(links) ? links : [];
+  const curLink = list[cur];
+  if (!curLink) return '';
+
+  const isStore = (l) => isListingUrl(l.url);
+  const curIsStore = isStore(curLink);
+
+  // Все магазины очереди: ссылки-списки + уникальные fromListing
+  const storeUrls = new Set();
+  for (const l of list) {
+    if (isStore(l)) storeUrls.add(l.url);
+    else if (l.fromListing) storeUrls.add(l.fromListing);
+  }
+
+  // Сколько разных магазинов встретилось до текущей позиции
+  const seen = new Set();
+  let storesBefore = 0;
+  for (let i = 0; i < cur; i++) {
+    const l = list[i];
+    const key = isStore(l) ? l.url : (l.fromListing || null);
+    if (key && !seen.has(key)) { seen.add(key); storesBefore++; }
+  }
+
+  const cp = catalogProgress(list, cur);
+  const total = `Всего ${cp.pos} из ${cp.total}`;
+
+  if (curIsStore) {
+    // Ссылка-список ещё в очереди — значит, её каталоги собираются прямо сейчас
+    const no = storesBefore + 1;
+    return `Магазин ${no} из ${storeUrls.size} · Каталоги: собираю список · ${total}`;
+  }
+
+  const storeUrl = curLink.fromListing;
+  if (!storeUrl || !storeUrls.has(storeUrl)) {
+    // Каталог вставлен вручную, не из ссылки-списка
+    return `Каталог ${cp.pos} из ${cp.total}`;
+  }
+  // Если каталоги этого магазина уже встречались раньше — он посчитан в storesBefore
+  const no = storesBefore - (seen.has(storeUrl) ? 1 : 0) + 1;
+  const siblings = list.filter((l) => l.fromListing === storeUrl);
+  const k = siblings.indexOf(curLink) + 1;
+  return `Магазин ${no} из ${storeUrls.size} · Каталоги ${k} из ${siblings.length} · ${total}`;
+}
+
+/**
+ * Прогресс по каталогам без учёта ссылок-списков (для полосы прогресса).
+ * Возвращает {pos, total}: total — сколько каталогов в очереди,
+ * pos — позиция текущей ссылки среди них (сама ссылка-список позицию
+ * не сдвигает, поэтому во время сбора списка pos = число готовых каталогов).
+ */
+function catalogProgress(links, cur) {
+  const list = Array.isArray(links) ? links : [];
+  let total = 0;
+  let pos = 0;
+  for (let i = 0; i < list.length; i++) {
+    if (isListingUrl(list[i].url)) continue; // ссылка-список — не каталог
+    total++;
+    if (i <= cur) pos++;
+  }
+  return { pos, total };
+}
+
 /* ================= Даты действия каталога (французский формат) ================= */
 
 /**

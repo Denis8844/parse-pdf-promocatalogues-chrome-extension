@@ -179,15 +179,21 @@ function render() {
   const running = run.state === 'running';
   const links = run.links || [];
 
-  // Заголовок: «Каталог 2 из 5»
+  // Заголовок: «Магазин 1 из 3 · Каталоги 2 из 12 · Всего 15 из 34»
+  // (магазины и каталоги считаются раздельно; без ссылок-списков — просто
+  // «Каталог 2 из 5», как раньше)
   if (running && run.current >= 0) {
-    elCap.textContent = `Каталог ${run.current + 1} из ${links.length}`;
+    elCap.textContent = progressCaption(links, run.current);
+    elCap.title = 'Магазин — по счёту из ссылок-списков; Каталоги — внутри текущего магазина; Всего — все каталоги очереди';
   } else if (run.state === 'finished') {
     elCap.textContent = 'Обработка завершена';
+    elCap.title = '';
   } else if (run.state === 'stopped') {
     elCap.textContent = 'Обработка остановлена';
+    elCap.title = '';
   } else {
     elCap.textContent = 'Ожидание…';
+    elCap.title = '';
   }
 
   // Текущий этап
@@ -210,7 +216,14 @@ function render() {
     } else if (run.stage === 'pages' || run.stage === 'opening' || run.stage === 'listing') {
       within = 0;
     }
-    percent = ((run.current + within) / links.length) * 100;
+    // Полоса — по каталогам («Всего … из …» из заголовка): ссылки-списки
+    // не считаются шагом, сбор списка полосу не двигает
+    const cp = catalogProgress(links, run.current);
+    const curIsCat = links[run.current] && !isListingUrl(links[run.current].url);
+    if (cp.total) {
+      const finished = cp.pos - (curIsCat ? 1 : 0);
+      percent = ((finished + (curIsCat ? within : 0)) / cp.total) * 100;
+    }
   } else if (run.state === 'finished' || run.state === 'stopped') {
     percent = 100;
   }

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Скачать каталоги",
-  "version": "1.10.3",
+  "version": "1.10.4",
   "description": "Скачивает страницы каталога promocatalogues.fr в PDF: находит страницы в панели миниатюр, загружает изображения в полном размере (zoomLargeWebP), конвертирует в JPEG и собирает PDF.",
   "minimum_chrome_version": "103",
 
