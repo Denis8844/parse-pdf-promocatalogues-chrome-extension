@@ -302,6 +302,49 @@ t('чужой домен — не список', () => {
   eq(utils.isListingUrl('не ссылка'), false);
 });
 
+/* ================= Настройки background.js / popup.js ================= */
+
+console.log('настройки (DEFAULTS/CLAMP/UI):');
+t('каждый ключ DEFAULTS реально используется в коде (нет «мёртвых» настроек)', () => {
+  const bg = fs.readFileSync(path.join(ROOT, 'background.js'), 'utf8');
+  const m = /const DEFAULTS = \{([\s\S]*?)\n\};/.exec(bg);
+  if (!m) throw new Error('не найден блок DEFAULTS');
+  const keys = [...m[1].matchAll(/^\s*([A-Z][A-Z_0-9]*):/gm)].map((x) => x[1]);
+  if (keys.length < 10) throw new Error('ключи DEFAULTS не извлеклись: ' + keys.length);
+  const dead = keys.filter((k) => !new RegExp('CFG\\.' + k + '\\b').test(bg));
+  if (dead.length) throw new Error('объявлены, но не используются: ' + dead.join(', '));
+});
+t('диапазоны CLAMP совпадают с min/max полей настроек в popup', () => {
+  const bg = fs.readFileSync(path.join(ROOT, 'background.js'), 'utf8');
+  const pp = fs.readFileSync(path.join(ROOT, 'popup.js'), 'utf8');
+
+  const clampM = /const CLAMP = \{([\s\S]*?)\n\};/.exec(bg);
+  if (!clampM) throw new Error('не найден блок CLAMP');
+  const clamps = {};
+  for (const mm of clampM[1].matchAll(/^\s*([A-Z][A-Z_0-9]*):\s*\[\s*([\d_.]+)\s*,\s*([\d_.]+)\s*\]/gm)) {
+    clamps[mm[1]] = [Number(mm[2].replace(/_/g, '')), Number(mm[3].replace(/_/g, ''))];
+  }
+
+  const groupsM = /const SETTINGS_GROUPS = \[([\s\S]*?)\n\];/.exec(pp);
+  if (!groupsM) throw new Error('не найден SETTINGS_GROUPS');
+  const fields = [...groupsM[1].matchAll(/\{[^{}]*?key:\s*'([A-Z][A-Z_0-9]*)'[^{}]*?min:\s*([\d.]+)[^{}]*?max:\s*([\d.]+)[^{}]*?\}/g)];
+  if (fields.length < 10) throw new Error('поля настроек не извлеклись: ' + fields.length);
+
+  for (const f of fields) {
+    const key = f[1];
+    const min = Number(f[2]);
+    const max = Number(f[3]);
+    const c = clamps[key];
+    if (!c) throw new Error(`у поля ${key} нет ограничения в CLAMP`);
+    // ms-поля в UI показываются в секундах
+    const isMs = /ms:\s*true/.test(f[0]);
+    const [cmin, cmax] = isMs ? [c[0] / 1000, c[1] / 1000] : c;
+    if (cmin !== min || cmax !== max) {
+      throw new Error(`${key}: UI ${min}–${max} с, CLAMP ${cmin}–${cmax}${isMs ? ' с' : ''}`);
+    }
+  }
+});
+
 /* ================= pdf.jpegInfo ================= */
 
 function fakeJpeg(w, h, comps) {

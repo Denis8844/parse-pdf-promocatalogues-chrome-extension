@@ -220,17 +220,21 @@ function updateBadge() {
 
 // Пока идёт обработка:
 //  1) offscreen-документ шлёт сообщения каждые 15 с (основной механизм);
-//  2) дополнительно шлём сами себе сообщение каждые 20 с;
+//  2) дополнительно шлём сами себе сообщение каждые KEEPALIVE_MS (20 с);
 //  3) heartbeat: если от контентного скрипта нет прогресса дольше HEARTBEAT_STALL_MS,
 //     ссылка считается зависшей (краш вкладки, потерянные сообщения) — фиксируем
 //     ошибку и переходим к следующей.
 function startWatchdog() {
   stopWatchdog();
   lastProgressAt = Date.now();
-  watchdogTimer = setInterval(() => {
-    // keep-alive
-    chrome.runtime.sendMessage({ type: 'KEEPALIVE' }).catch(() => {});
 
+  // Keep-alive: самопинг отдельным таймером с периодом KEEPALIVE_MS (20 с) —
+  // дополнительно к offscreen-документу, который шлёт сообщения каждые 15 с.
+  keepAliveTimer = setInterval(() => {
+    chrome.runtime.sendMessage({ type: 'KEEPALIVE' }).catch(() => {});
+  }, CFG.KEEPALIVE_MS);
+
+  watchdogTimer = setInterval(() => {
     // heartbeat: только во время стадий, которыми управляет контентный скрипт
     if (!run || run.state !== 'running' || !activeJobId) return;
     if (run.stage === 'opening' || run.stage === 'downloading' || run.stage === 'idle') return;
@@ -265,6 +269,10 @@ function stopWatchdog() {
   if (watchdogTimer) {
     clearInterval(watchdogTimer);
     watchdogTimer = null;
+  }
+  if (keepAliveTimer) {
+    clearInterval(keepAliveTimer);
+    keepAliveTimer = null;
   }
 }
 
