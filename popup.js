@@ -65,6 +65,7 @@ function updateTicks() {
 const STAGE_TEXTS = {
   idle: '',
   opening: 'Открытие страницы…',
+  listing: 'Чтение списка каталогов магазина…',
   pages: 'Загрузка страниц…',
   page: '',            // для этого этапа показываем «Страница X из Y»
   pdf: 'Создание PDF…',
@@ -77,7 +78,8 @@ const ICONS = {
   retrying: '↻',
   done: '✓',
   error: '✕',
-  cancelled: '⊘'
+  cancelled: '⊘',
+  skipped: '∅'
 };
 
 // Маленькая иконка «копировать» (inline SVG — без внешних ресурсов)
@@ -179,7 +181,7 @@ function render() {
     let within = 1;
     if (run.stage === 'page' && run.page && run.page.total) {
       within = Math.max(0, (run.page.current - 1) / run.page.total);
-    } else if (run.stage === 'pages' || run.stage === 'opening') {
+    } else if (run.stage === 'pages' || run.stage === 'opening' || run.stage === 'listing') {
       within = 0;
     }
     percent = ((run.current + within) / links.length) * 100;
@@ -201,6 +203,7 @@ function render() {
     let html = `<div class="s-title">${run.state === 'stopped' ? 'Обработка остановлена' : 'Обработка завершена'}</div>`;
     html += `Успешно: <b>${s.ok}</b> · Ошибки: <span class="s-err"><b>${s.err}</b></span> · Всего: <b>${s.total}</b>`;
     if (s.cancelled) html += ` · Отменено: <b>${s.cancelled}</b>`;
+    if (s.skipped) html += ` · Пропущено: <b>${s.skipped}</b>`;
     // Кнопка «Повторить ошибки» — только когда очередь завершена и есть ошибки
     if (s.err > 0 && (run.state === 'finished' || run.state === 'stopped')) {
       html += `<div class="retry-row"><button id="retryBtn" class="primary">Повторить ошибки (${s.err})</button></div>`;
@@ -239,6 +242,16 @@ function renderLinkItem(link, i) {
   url.title = link.url;
   body.appendChild(url);
 
+  // Дата действия каталога («Valable: 25 sept. au 12 oct.») — у каталогов,
+  // развёрнутых из ссылки-списка; после скачивания дата уже в имени файла.
+  if (link.dateText && link.status !== 'done') {
+    const d = document.createElement('div');
+    d.className = 'date';
+    d.textContent = link.dateText;
+    d.title = 'дата действия каталога';
+    body.appendChild(d);
+  }
+
   if (link.status === 'done' && link.filename) {
     const f = document.createElement('div');
     f.className = 'file';
@@ -263,7 +276,7 @@ function renderLinkItem(link, i) {
     body.appendChild(t);
   }
 
-  if ((link.status === 'error' || link.status === 'cancelled') && link.error) {
+  if ((link.status === 'error' || link.status === 'cancelled' || link.status === 'skipped') && link.error) {
     const e = document.createElement('div');
     e.className = 'err';
     e.textContent = link.error;
@@ -374,6 +387,7 @@ const SETTINGS_GROUPS = [
       { key: 'SEND_TIMEOUT_MS', label: 'Отправка команды старта', min: 1, max: 60, step: 1, ms: true },
       { key: 'SETTLE_MS', label: 'Пауза после загрузки', hint: 'ждём появления панели миниатюр', min: 0, max: 30, step: 0.1, ms: true },
       { key: 'PAGE_WAIT_TIMEOUT_MS', label: 'Поиск страниц каталога', hint: 'если панель миниатюр не появилась', min: 5, max: 600, step: 1, ms: true },
+      { key: 'LISTING_TIMEOUT_MS', label: 'Сбор списка каталогов', hint: 'страница /magasins/…: список и «Charger plus»', min: 30, max: 600, step: 5, ms: true },
       { key: 'FETCH_TIMEOUT_MS', label: 'Загрузка одного изображения', min: 10, max: 600, step: 1, ms: true },
       { key: 'LINK_TIMEOUT_MS', label: 'Лимит на одну ссылку', hint: 'общий watchdog', min: 60, max: 7200, step: 60, ms: true },
       { key: 'DOWNLOAD_TIMEOUT_MS', label: 'Ожидание скачивания PDF', hint: 'в т.ч. диалог «Сохранить как»', min: 30, max: 3600, step: 30, ms: true }
@@ -421,7 +435,8 @@ const SETTINGS_FALLBACK = {
   NAV_RECOVERY_MAX: 3,
   JPEG_Q: 0.92,
   PAGE_WAIT_TIMEOUT_MS: 60000,
-  FETCH_TIMEOUT_MS: 120000
+  FETCH_TIMEOUT_MS: 120000,
+  LISTING_TIMEOUT_MS: 180000
 };
 
 function setStatus(text, cls) {

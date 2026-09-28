@@ -1,10 +1,19 @@
 'use strict';
 
+// utils.js нужен service worker'у для isListingUrl (признак ссылки-списка
+// /magasins/<ритейлер>/catalogues-promotions) и isHttpUrl. Файл специально
+// не использует chrome.* и его top-level объявления не конфликтуют
+// с объявлениями этого файла (поэтому «свой» sleep здесь не объявляется).
+importScripts('utils.js');
+
 /**
  * Service worker (Manifest V3) — оркестратор очереди каталогов.
  *
  * Отвечает за:
  *  - очередь ссылок и строго последовательную обработку;
+ *  - разворачивание ссылок-списков (/magasins/…/catalogues-promotions):
+ *    открывает страницу магазина, внедряет listing.js, получает все активные
+ *    каталоги с датами действия и заменяет ссылку-список на отдельные каталоги;
  *  - открытие технической вкладки и ожидание её загрузки;
  *  - внедрение контентного скрипта (utils.js, pdf.js, content.js);
  *  - передачу команды CATALOG_START и приём прогресса/результата;
@@ -48,10 +57,12 @@ const DEFAULTS = {
   RETRY_MAX: 2,                     // доп. попытки на ссылку после технических ошибок
   RETRY_DELAY_MS: 5_000,            // пауза между попытками
   NAV_RECOVERY_MAX: 3,              // максимум навигаций-восстановлений на одну ссылку
+  LISTING_TIMEOUT_MS: 180_000,      // сбор списка каталогов со страницы-списка
   // параметры контентного скрипта (передаются в CATALOG_START)
   JPEG_Q: 0.92,                     // качество JPEG (как в исходном скрипте)
   PAGE_WAIT_TIMEOUT_MS: 60_000,     // сколько ждём появления панели миниатюр
-  FETCH_TIMEOUT_MS: 120_000         // таймаут загрузки одного полноразмерного изображения
+  FETCH_TIMEOUT_MS: 120_000,        // таймаут загрузки одного полноразмерного изображения
+  LISTING_INJECT_FILES: ['utils.js', 'listing.js'] // скрипты страницы-списка
 };
 
 const CFG = { ...DEFAULTS };
@@ -75,7 +86,8 @@ const CLAMP = {
   KEEPALIVE_MS: [5_000, 120_000],
   JPEG_Q: [0.1, 1],
   PAGE_WAIT_TIMEOUT_MS: [5_000, 600_000],
-  FETCH_TIMEOUT_MS: [10_000, 600_000]
+  FETCH_TIMEOUT_MS: [10_000, 600_000],
+  LISTING_TIMEOUT_MS: [30_000, 600_000]
 };
 
 // Применяет сохранённые настройки (валидация + ограничение диапазонов).
@@ -114,7 +126,7 @@ const LOG_MAX = 400;
 
 let run = null;            // { state, links[], current, stage, page, summary, startedAt }
 let activeJobId = null;    // jobId текущей обработки
-let pendingJob = null;     // { resolve, reject } — ждём CATALOG_RESULT / CATALOG_ERROR
+let pendingJob = null;     // { resolve, reject } — ждём CATALOG_RESULT / CATALOG_ERROR / LISTING_RESULT / LISTING_ERROR
 let stopRequested = false;
 let keepAliveTimer = null;
 let watchdogTimer = null;
@@ -126,6 +138,8 @@ let scriptInjected = false; // контентный скрипт внедрён 
 let injectedUrl = null;     // URL документа, в который внедрён скрипт
 let navRecoveryCount = 0;   // сколько раз восстанавливали скрипт после навигации (на ссылку)
 let lastPokedAt = 0;        // когда последний раз слали повторный START
+let activeMode = 'catalog'; // 'catalog' (ридер) | 'listing' (страница-список) — режим текущей обработки
+let lastListingFound = -1;  // последний известный размер списка каталогов (для журнала)
 
 /* Журнал событий (кольцевой буфер) — для диагностики: кнопка «Копировать журнал» в popup. */
 const eventLog = [];
@@ -139,14 +153,14 @@ class StopError extends Error {}
 
 /* ================= Утилиты ================= */
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
+// Пауза: простая sleep объявлена в utils.js (подключается через importScripts),
+// здесь — только прерываемая остановкой очереди версия.
 const messageOf = (e) => (e && e.message) ? e.message : String(e);
 
 // Ошибки, которые бесполезно повторять: их причина окончательна и не изменится
 // от новой попытки (например, ссылка ведёт не на ридер каталога).
 function isDefinitiveError(msg) {
-  return /страницы не найдены/.test(String(msg));
+  return /страницы не найдены|страница магазина/.test(String(msg));
 }
 
 function withTimeout(promise, ms, message, onTimeout) {
@@ -229,14 +243,16 @@ function startWatchdog() {
     if (idleMs > CFG.POKE_STALL_MS && Date.now() - lastPokedAt > CFG.POKE_STALL_MS) {
       lastPokedAt = Date.now();
       addLog('нет прогресса ' + Math.round(CFG.POKE_STALL_MS / 1000) + ' с — повторная команда старта');
-      chrome.tabs.sendMessage(activeTabId, { type: 'CATALOG_START', jobId: activeJobId }).catch(() => {});
+      chrome.tabs.sendMessage(activeTabId, startMessageFor()).catch(() => {});
     }
 
     if (idleMs <= CFG.HEARTBEAT_STALL_MS) return;
 
     addLog(`heartbeat: нет прогресса от страницы более ${Math.round(CFG.HEARTBEAT_STALL_MS / 60000)} мин — прерываю ссылку`);
     if (activeTabId != null) {
+      // прерываем оба контентных скрипта: каждый игнорирует «чужие» сообщения
       chrome.tabs.sendMessage(activeTabId, { type: 'CATALOG_ABORT', jobId: activeJobId }).catch(() => {});
+      chrome.tabs.sendMessage(activeTabId, { type: 'LISTING_ABORT', jobId: activeJobId }).catch(() => {});
     }
     lastProgressAt = Date.now(); // не срабатываем повторно
     const p = pendingJob;
@@ -323,6 +339,7 @@ function recoverRun() {
               ok: (stored.links || []).filter((l) => l.status === 'done').length,
               err: (stored.links || []).filter((l) => l.status === 'error').length,
               cancelled: (stored.links || []).filter((l) => l.status === 'cancelled').length,
+              skipped: (stored.links || []).filter((l) => l.status === 'skipped').length,
               total: (stored.links || []).length
             };
             addLog('восстановление: очередь помечена остановленной (перезапуск SW)');
@@ -387,6 +404,16 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
     case 'CATALOG_ERROR':
       return handleCatalogError(msg);
 
+    // Сообщения от скрипта страницы-списка
+    case 'LISTING_PROGRESS':
+      return handleListingProgress(msg);
+
+    case 'LISTING_RESULT':
+      return handleListingResult(msg);
+
+    case 'LISTING_ERROR':
+      return handleListingError(msg);
+
     default:
       // KEEPALIVE, RUN_UPDATE и прочие — игнорируем.
       return undefined;
@@ -443,12 +470,13 @@ chrome.tabs.onUpdated.addListener(async (tabId, info, tab) => {
 
   addLog('навигация вкладки → ' + url + ': повторное внедрение скрипта');
   try {
-    await chrome.scripting.executeScript({ target: { tabId }, files: CFG.INJECT_FILES });
-    await chrome.tabs.sendMessage(tabId, {
-      type: 'CATALOG_START',
-      jobId: activeJobId,
-      settings: settingsPayload()
+    // файлы и команда старта зависят от режима: ридер каталога или страница-список
+    const listing = activeMode === 'listing';
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: listing ? CFG.LISTING_INJECT_FILES : CFG.INJECT_FILES
     });
+    await chrome.tabs.sendMessage(tabId, startMessageFor());
     scriptInjected = true;
     injectedUrl = url;
     lastProgressAt = Date.now();
@@ -458,12 +486,31 @@ chrome.tabs.onUpdated.addListener(async (tabId, info, tab) => {
   }
 });
 
+// Ссылка, обрабатываемая прямо сейчас (или null).
+function currentLink() {
+  if (!run || run.current == null || run.current < 0) return null;
+  return (run.links && run.links[run.current]) || null;
+}
+
+// Команда старта для текущей вкладки с учётом режима обработки:
+// ридер каталога (CATALOG_START с настройками и датой действия) или
+// страница-список (LISTING_START).
+function startMessageFor() {
+  return (activeMode === 'listing')
+    ? { type: 'LISTING_START', jobId: activeJobId }
+    : { type: 'CATALOG_START', jobId: activeJobId, settings: settingsPayload(currentLink()) };
+}
+
 // Настройки контентного скрипта — передаются вместе с командой старта.
-function settingsPayload() {
+// validity — дата действия каталога, собранная со страницы-списка
+// (попадает в имя PDF; для ссылок, вставленных вручную, отсутствует).
+function settingsPayload(link) {
+  const l = link || currentLink();
   return {
     jpegQ: CFG.JPEG_Q,
     pageWaitTimeoutMs: CFG.PAGE_WAIT_TIMEOUT_MS,
-    fetchTimeoutMs: CFG.FETCH_TIMEOUT_MS
+    fetchTimeoutMs: CFG.FETCH_TIMEOUT_MS,
+    validity: (l && l.validity && typeof l.validity === 'object') ? l.validity : null
   };
 }
 
@@ -514,9 +561,10 @@ async function handleStop() {
   stopRequested = true;
   addLog('остановка по запросу пользователя');
 
-  // 1) прерываем контентный скрипт
+  // 1) прерываем контентный скрипт (ридера или страницы-списка)
   if (activeJobId && activeTabId != null) {
     chrome.tabs.sendMessage(activeTabId, { type: 'CATALOG_ABORT', jobId: activeJobId }).catch(() => {});
+    chrome.tabs.sendMessage(activeTabId, { type: 'LISTING_ABORT', jobId: activeJobId }).catch(() => {});
   }
 
   // 2) отменяем текущее скачивание
@@ -549,7 +597,17 @@ async function runQueue() {
       if (stopRequested) break;
 
       run.current = i;
-      const link = run.links[i];
+      let link = run.links[i];
+
+      // Ссылка-список (/magasins/<ритейлер>/catalogues-promotions): разворачиваем
+      // её в отдельные каталоги и продолжаем обработку уже с ними.
+      if (isListingUrl(link.url)) {
+        const expanded = await expandListingLink(link);
+        if (!expanded) continue; // помечена ошибкой/пропуском — следующая ссылка
+        link = run.links[i];     // первый каталог из развёрнутого списка
+        if (!link) continue;
+      }
+
       link.status = 'active';
       link.error = null;
       link.startedAt = Date.now();
@@ -648,6 +706,7 @@ function finalizeRun() {
   const ok = run.links.filter((l) => l.status === 'done').length;
   const err = run.links.filter((l) => l.status === 'error').length;
   const cancelled = run.links.filter((l) => l.status === 'cancelled').length;
+  const skipped = run.links.filter((l) => l.status === 'skipped').length;
 
   // фиксируем время завершения для всех завершённых ссылок (таймеры в popup замирают)
   for (const l of run.links) {
@@ -657,7 +716,7 @@ function finalizeRun() {
   }
   run.endedAt = Date.now();
 
-  run.summary = { ok, err, cancelled, total: run.links.length };
+  run.summary = { ok, err, cancelled, skipped, total: run.links.length };
   run.state = stopped ? 'stopped' : 'finished';
   run.stage = 'idle';
   run.page = null;
@@ -669,11 +728,204 @@ function finalizeRun() {
   broadcast();
 }
 
+/* ================= Страницы-списки каталогов ================= */
+
+/**
+ * Разворачивает ссылку-список (/magasins/<ритейлер>/catalogues-promotions)
+ * в отдельные каталоги.
+ *
+ * Как работает: открываем страницу магазина в технической вкладке, внедряем
+ * listing.js, получаем все карточки каталогов (включая нажатие «Charger plus»),
+ * фильтруем активные (online / futureOnline), убираем дубликаты против уже
+ * стоящих в очереди ссылок и заменяем ссылку-список найденными каталогами —
+ * очередь продолжает обработку уже с них (каждый каталог качается своим PDF,
+ * а дата действия из карточки попадает в имя файла).
+ *
+ * @returns {Promise<boolean>} true — ссылка заменена каталогами (обработку
+ *   продолжаем с первого из них); false — помечена ошибкой/пропуском.
+ */
+async function expandListingLink(link) {
+  const i = run.links.indexOf(link);
+  if (i < 0) return false;
+
+  link.startedAt = link.startedAt || Date.now();
+  run.stage = 'listing';
+  lastListingFound = -1;
+  await saveRun();
+  broadcast();
+
+  addLog(`[${i + 1}/${run.links.length}] ссылка-список: собираю каталоги с ${link.url}`);
+
+  let catalogues;
+  try {
+    catalogues = await processListingTab(link.url);
+  } catch (e) {
+    const stopped = stopRequested || e instanceof StopError;
+    if (stopped) {
+      link.status = 'cancelled';
+      link.error = 'остановлено пользователем';
+    } else {
+      link.status = 'error';
+      link.error = 'не удалось собрать список каталогов: ' + messageOf(e);
+    }
+    link.endedAt = Date.now();
+    addLog('список не собран: ' + messageOf(e));
+    await saveRun();
+    broadcast();
+    return false;
+  }
+
+  // Только активные каталоги (online — действует, futureOnline — скоро начнётся);
+  // завершившиеся и неизвестные статусы пропускаем.
+  const active = catalogues.filter((c) => c && c.active && isHttpUrl(c.url));
+  const inactive = catalogues.length - active.length;
+
+  // Дедупликация: не добавляем каталоги, которые уже есть в очереди
+  // (вставлены вручную или найдены через другую ссылку-список).
+  const existing = new Set(run.links.map((l) => l.url));
+  const fresh = [];
+  let dup = 0;
+  for (const c of active) {
+    if (existing.has(c.url)) { dup++; continue; }
+    existing.add(c.url);
+    fresh.push({
+      url: c.url,
+      status: 'pending',
+      error: null,
+      filename: null,
+      title: c.title || null,
+      dateText: c.dateText || null,                       // «Valable: 25 sept. au 12 oct.»
+      validity: (c.validity && (c.validity.from || c.validity.to)) ? c.validity : null,
+      fromListing: link.url                               // откуда каталог появился
+    });
+  }
+
+  addLog(
+    `список собран: каталогов на странице — ${catalogues.length}` +
+    (inactive ? `, не активных пропущено — ${inactive}` : '') +
+    (dup ? `, уже есть в очереди — ${dup}` : '') +
+    `; будет скачано — ${fresh.length}`
+  );
+
+  if (!fresh.length) {
+    // Скачивать нечего — это не ошибка, а осознанный пропуск.
+    link.status = 'skipped';
+    link.error = catalogues.length
+      ? (active.length
+          ? 'все найденные каталоги уже есть в очереди'
+          : 'активных каталогов на странице нет')
+      : 'на странице не найдено ни одного каталога';
+    link.endedAt = Date.now();
+    await saveRun();
+    broadcast();
+    return false;
+  }
+
+  run.links.splice(i, 1, ...fresh);
+  await saveRun();
+  broadcast();
+  return true;
+}
+
+/**
+ * Открывает страницу-список в технической вкладке, внедряет listing.js
+ * и возвращает собранный список каталогов:
+ * [{url, title, dateText, status, active, validity}].
+ */
+async function processListingTab(url) {
+  let tabId = null;
+
+  activeMode = 'listing';
+  try {
+    run.stage = 'listing';
+    await saveRun();
+    broadcast();
+
+    // 1. Открываем техническую вкладку.
+    const settings = await chrome.storage.local.get('activeTab');
+    const tab = await withTimeout(
+      chrome.tabs.create({ url, active: !!settings.activeTab }),
+      CFG.TAB_CREATE_TIMEOUT_MS,
+      'не удалось открыть вкладку за отведённое время'
+    );
+    tabId = tab.id;
+    activeTabId = tabId;
+    scriptInjected = false;
+    injectedUrl = null;
+    navRecoveryCount = 0;
+    lastListingFound = -1;
+    addLog(`вкладка списка ${tabId} открыта: ${url}`);
+
+    // 2. Ждём полной загрузки.
+    await waitTabComplete(tabId, CFG.TAB_LOAD_TIMEOUT_MS);
+    checkStop();
+    await sleepInterruptible(CFG.SETTLE_MS);
+    addLog('вкладка списка загружена');
+
+    // 3. Внедряем скрипт сбора списка.
+    await withTimeout(
+      chrome.scripting.executeScript({
+        target: { tabId },
+        files: CFG.LISTING_INJECT_FILES
+      }),
+      CFG.INJECT_TIMEOUT_MS,
+      'не удалось внедрить скрипт списка за отведённое время'
+    );
+    scriptInjected = true;
+    try {
+      const t = await chrome.tabs.get(tabId);
+      injectedUrl = (t && t.url) || url;
+    } catch { injectedUrl = url; }
+    addLog('скрипт списка внедрён');
+
+    // 4. Запускаем сбор и ждём результат.
+    activeJobId = crypto.randomUUID();
+    lastProgressAt = Date.now();
+    const jobPromise = new Promise((resolve, reject) => {
+      pendingJob = { resolve, reject };
+    });
+
+    try {
+      await withTimeout(
+        chrome.tabs.sendMessage(tabId, { type: 'LISTING_START', jobId: activeJobId }),
+        CFG.SEND_TIMEOUT_MS,
+        'скрипт списка не принял команду старта'
+      );
+
+      const result = await withTimeout(
+        jobPromise,
+        CFG.LISTING_TIMEOUT_MS,
+        'таймаут сбора списка каталогов',
+        () => {
+          chrome.tabs.sendMessage(tabId, { type: 'LISTING_ABORT', jobId: activeJobId }).catch(() => {});
+        }
+      );
+
+      checkStop();
+      if (!result || !Array.isArray(result.catalogues)) {
+        throw new Error('скрипт списка вернул некорректный ответ');
+      }
+      return result.catalogues;
+    } finally {
+      pendingJob = null;
+    }
+  } finally {
+    activeMode = 'catalog';
+    // Техническая вкладка закрывается в любом случае.
+    if (tabId != null) {
+      try { await chrome.tabs.remove(tabId); } catch { /* уже закрыта */ }
+    }
+    activeTabId = null;
+  }
+}
+
 /* ================= Обработка одной ссылки ================= */
 
 async function processLink(link) {
   const url = link.url;
   let tabId = null;
+
+  activeMode = 'catalog'; // обрабатываем ридер каталога (не страницу-список)
 
   try {
     // 1. Открываем техническую вкладку.
@@ -732,7 +984,7 @@ async function processLink(link) {
         chrome.tabs.sendMessage(tabId, {
           type: 'CATALOG_START',
           jobId: activeJobId,
-          settings: settingsPayload()
+          settings: settingsPayload(link)
         }),
         CFG.SEND_TIMEOUT_MS,
         'контентный скрипт не принял команду старта'
@@ -925,6 +1177,36 @@ async function handleCatalogResult(msg) {
 async function handleCatalogError(msg) {
   if (msg.jobId !== activeJobId) return { ignored: true };
   addLog('ошибка от страницы: ' + (msg.message || 'неизвестная ошибка'));
+  const p = pendingJob;
+  pendingJob = null;
+  if (p) p.reject(new Error(msg.message || 'неизвестная ошибка'));
+  return { ok: true };
+}
+
+/* ================= Сообщения скрипта страницы-списка ================= */
+
+async function handleListingProgress(msg) {
+  if (msg.jobId !== activeJobId) return { ignored: true };
+
+  lastProgressAt = Date.now(); // heartbeat видит, что сбор списка идёт
+  if (typeof msg.found === 'number' && msg.found !== lastListingFound) {
+    lastListingFound = msg.found;
+    addLog('список: найдено каталогов — ' + msg.found);
+  }
+  return { ok: true };
+}
+
+async function handleListingResult(msg) {
+  if (msg.jobId !== activeJobId) return { ignored: true };
+  const p = pendingJob;
+  pendingJob = null;
+  if (p) p.resolve(msg);
+  return { ok: true };
+}
+
+async function handleListingError(msg) {
+  if (msg.jobId !== activeJobId) return { ignored: true };
+  addLog('ошибка от страницы-списка: ' + (msg.message || 'неизвестная ошибка'));
   const p = pendingJob;
   pendingJob = null;
   if (p) p.reject(new Error(msg.message || 'неизвестная ошибка'));

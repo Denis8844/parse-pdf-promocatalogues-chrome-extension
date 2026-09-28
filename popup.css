@@ -343,6 +343,15 @@ button:disabled {
   text-overflow: ellipsis;
 }
 
+/* дата действия каталога («Valable: …») у ссылок из страницы-списка */
+#list .date {
+  font-size: 11.5px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 #list .err {
   font-size: 11.5px;
   color: var(--red);
@@ -358,6 +367,10 @@ button:disabled {
 #list li.done .ic { color: var(--green); }
 #list li.error .ic { color: var(--red); }
 #list li.cancelled .ic { color: var(--gray); }
+#list li.skipped .ic { color: var(--gray); }
+
+/* пропущенная ссылка — пояснение приглушённым цветом, а не красным */
+#list li.skipped .err { color: var(--muted); }
 
 .summary {
   margin-top: 10px;

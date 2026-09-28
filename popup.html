@@ -22,9 +22,9 @@
   </header>
 
   <main id="main">
-    <label class="lbl" for="urls">Ссылки на каталоги promocatalogues.fr — по одной на строку</label>
+    <label class="lbl" for="urls">Ссылки на каталоги или страницы магазинов promocatalogues.fr — по одной на строку</label>
     <textarea id="urls" rows="8" spellcheck="false"
-      placeholder="/regardez/offres/catalogue-picard-3660147&#10;/regardez/offres/catalogue-castorama-3751268&#10;/regardez/offres/catalogue-la-redoute-3763748"></textarea>
+      placeholder="/regardez/offres/catalogue-picard-3660147&#10;/regardez/offres/catalogue-castorama-3751268&#10;/regardez/offres/catalogue-la-redoute-3763748&#10;/magasins/carrefour/catalogues-promotions"></textarea>
     <div class="count-row"><span id="count" class="muted">Ссылок пока нет</span></div>
 
     <div class="actions">
@@ -65,7 +65,10 @@
   <footer class="muted">
     <div>Относительные ссылки дополняются до https://www.promocatalogues.fr
       (разделители: строка, пробел, запятая, «;», «|» — можно смешивать).
-      Каталоги обрабатываются строго по очереди. Окно можно закрыть — загрузка продолжится.</div>
+      Ссылка вида /magasins/&lt;магазин&gt;/catalogues-promotions разворачивается
+      в список всех активных каталогов магазина — каждый скачается отдельным PDF
+      с датой действия в имени. Каталоги обрабатываются строго по очереди.
+      Окно можно закрыть — загрузка продолжится.</div>
     <div class="foot-row">
       <span>v<span id="ver"></span></span>
       <button id="logBtn" class="linklike" title="Скопировать журнал событий в буфер обмена">Копировать журнал</button>

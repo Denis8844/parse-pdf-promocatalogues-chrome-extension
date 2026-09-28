@@ -19,7 +19,7 @@ const src = ['utils.js', 'pdf.js']
   .map((f) => fs.readFileSync(path.join(ROOT, f), 'utf8'))
   .join('\n');
 
-const fn = new Function(`${src}\n;return { parseLinks, isHttpUrl, makeCatalogFilename, sleep, jpegInfo, collectPdfChunks, makePdfBlob, PDF_DPI };`);
+const fn = new Function(`${src}\n;return { parseLinks, isHttpUrl, makeCatalogFilename, sleep, jpegInfo, collectPdfChunks, makePdfBlob, PDF_DPI, isListingUrl, parseFrenchDateRange, validitySuffix };`);
 const exports = fn();
 const utils = exports;
 const pdf = exports;
@@ -190,6 +190,116 @@ t('номер уже в заголовке — не дублируется', () 
 });
 t('сегмент из одних цифр номером не считается', () => {
   eq(utils.makeCatalogFilename('Нечто', '/flyers/3660147'), `Нечто_${TODAY}.pdf`);
+});
+
+/* ================= utils.makeCatalogFilename + дата действия ================= */
+
+console.log('makeCatalogFilename с датой действия:');
+t('диапазон действия: …_du_…_au_….pdf', () => {
+  const f = utils.makeCatalogFilename(
+    'Catalogue Carrefour - Promocatalogues.fr',
+    '/regardez/offres/catalogue-carrefour-3814497',
+    { from: '2026-09-29', to: '2026-10-12' }
+  );
+  eq(f, 'Catalogue_Carrefour_3814497_du_2026-09-29_au_2026-10-12.pdf');
+});
+t('только начало действия: …_du_….pdf', () => {
+  eq(utils.makeCatalogFilename('Каталог', '/x', { from: '2026-09-25' }), `Каталог_du_2026-09-25.pdf`);
+});
+t('только конец действия: …_au_….pdf', () => {
+  eq(utils.makeCatalogFilename('Каталог', '/regardez/offres/catalogue-x-5', { to: '2026-10-12' }),
+     'Каталог_5_au_2026-10-12.pdf');
+});
+t('некорректная дата — fallback на сегодняшнюю (как раньше)', () => {
+  eq(utils.makeCatalogFilename('Каталог', '/x', { from: 'не-дата' }), `Каталог_${TODAY}.pdf`);
+  eq(utils.makeCatalogFilename('Каталог', '/x', {}), `Каталог_${TODAY}.pdf`);
+});
+t('без даты — сегодняшняя (обратная совместимость)', () => {
+  eq(utils.makeCatalogFilename('Каталог', '/x', null), `Каталог_${TODAY}.pdf`);
+  eq(utils.makeCatalogFilename('Каталог', '/x'), `Каталог_${TODAY}.pdf`);
+});
+t('validitySuffix: варианты', () => {
+  eq(utils.validitySuffix({ from: '2026-09-25', to: '2026-10-12' }), 'du_2026-09-25_au_2026-10-12');
+  eq(utils.validitySuffix({ from: '2026-09-25' }), 'du_2026-09-25');
+  eq(utils.validitySuffix({ to: '2026-10-12' }), 'au_2026-10-12');
+  eq(utils.validitySuffix(null), null);
+  eq(utils.validitySuffix({ from: '25/09/2026' }), null);
+});
+
+/* ================= utils.parseFrenchDateRange ================= */
+
+console.log('parseFrenchDateRange:');
+const NOW = new Date(2026, 8, 28); // 28 сентября 2026 (месяцы с 0)
+t('простой диапазон «Valable: 25 sept. au 12 oct.»', () => {
+  eq(utils.parseFrenchDateRange('Valable: 25 sept. au 12 oct.', NOW),
+     { from: '2026-09-25', to: '2026-10-12' });
+});
+t('будущий каталог (futureOnline): «29 sept. au 12 oct.»', () => {
+  eq(utils.parseFrenchDateRange('Valable: 29 sept. au 12 oct.', NOW),
+     { from: '2026-09-29', to: '2026-10-12' });
+});
+t('«1er» распознаётся как 1-е число', () => {
+  eq(utils.parseFrenchDateRange('Valable: 1er sept. au 30 sept.', NOW),
+     { from: '2026-09-01', to: '2026-09-30' });
+});
+t('полные названия месяцев и диакритика (août, décembre)', () => {
+  eq(utils.parseFrenchDateRange('Valable: 25 août au 15 décembre', NOW),
+     { from: '2026-08-25', to: '2026-12-15' });
+});
+t('явные годы в тексте используются как есть', () => {
+  eq(utils.parseFrenchDateRange('Valable: 29 déc. 2026 au 11 janv. 2027', NOW),
+     { from: '2026-12-29', to: '2027-01-11' });
+});
+t('переход года без явных годов: «29 déc. au 11 janv.» в декабре', () => {
+  const dec = new Date(2026, 11, 15); // 15 декабря 2026
+  eq(utils.parseFrenchDateRange('Valable: 29 déc. au 11 janv.', dec),
+     { from: '2026-12-29', to: '2027-01-11' });
+});
+t('одна дата в будущем январе (декабрь) → следующий год', () => {
+  const dec = new Date(2026, 11, 15);
+  eq(utils.parseFrenchDateRange('à partir du 5 janv.', dec), { from: '2027-01-05' });
+});
+t('давно начавшийся каталог остаётся в текущем году', () => {
+  // «3 avr. au 30 sept.» на 28 сентября: конец в будущем — год не сдвигается
+  eq(utils.parseFrenchDateRange('Valable: 3 avr. au 30 sept.', NOW),
+     { from: '2026-04-03', to: '2026-09-30' });
+});
+t('одна дата в прошлом — текущий год', () => {
+  eq(utils.parseFrenchDateRange('Valable: 15 sept.', NOW), { from: '2026-09-15' });
+});
+t('текст без дат — null', () => {
+  eq(utils.parseFrenchDateRange('Valable dans 5 jours', NOW), null);
+  eq(utils.parseFrenchDateRange('', NOW), null);
+  eq(utils.parseFrenchDateRange(null, NOW), null);
+});
+t('время работы магазина («08:00 - 22:00») не распознаётся как дата', () => {
+  eq(utils.parseFrenchDateRange('Aujourd\'hui : 08:00 - 22:00', NOW), null);
+});
+
+/* ================= utils.isListingUrl ================= */
+
+console.log('isListingUrl:');
+t('ссылка-список распознаётся', () => {
+  eq(utils.isListingUrl('https://www.promocatalogues.fr/magasins/carrefour/catalogues-promotions'), true);
+});
+t('с trailing slash и без www', () => {
+  eq(utils.isListingUrl('https://promocatalogues.fr/magasins/aldi/catalogues-promotions/'), true);
+});
+t('относительный путь после normalizeCatalogLink — тоже список', () => {
+  const { links } = utils.parseLinks('/magasins/lidl/catalogues-promotions');
+  eq(links.length, 1);
+  eq(utils.isListingUrl(links[0]), true);
+});
+t('ридер каталога — не список', () => {
+  eq(utils.isListingUrl('https://www.promocatalogues.fr/regardez/offres/catalogue-carrefour-3814497'), false);
+});
+t('другие страницы магазина — не список', () => {
+  eq(utils.isListingUrl('https://www.promocatalogues.fr/magasins/carrefour/offres'), false);
+  eq(utils.isListingUrl('https://www.promocatalogues.fr/magasins/carrefour'), false);
+});
+t('чужой домен — не список', () => {
+  eq(utils.isListingUrl('https://example.com/magasins/x/catalogues-promotions'), false);
+  eq(utils.isListingUrl('не ссылка'), false);
 });
 
 /* ================= pdf.jpegInfo ================= */
