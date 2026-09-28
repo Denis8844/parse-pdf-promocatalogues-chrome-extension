@@ -42,7 +42,8 @@
   let activeSettings = {
     jpegQ: Q,
     pageWaitTimeoutMs: PAGE_WAIT_TIMEOUT_MS,
-    fetchTimeoutMs: FETCH_TIMEOUT_MS
+    fetchTimeoutMs: FETCH_TIMEOUT_MS,
+    validity: null            // дата действия каталога со страницы-списка ({from,to})
   };
 
   const sNum = (v, fallback) => (typeof v === 'number' && isFinite(v)) ? v : fallback;
@@ -141,7 +142,8 @@
     activeSettings = {
       jpegQ: sNum(s.jpegQ, Q),
       pageWaitTimeoutMs: sNum(s.pageWaitTimeoutMs, PAGE_WAIT_TIMEOUT_MS),
-      fetchTimeoutMs: sNum(s.fetchTimeoutMs, FETCH_TIMEOUT_MS)
+      fetchTimeoutMs: sNum(s.fetchTimeoutMs, FETCH_TIMEOUT_MS),
+      validity: (s.validity && typeof s.validity === 'object') ? s.validity : null
     };
 
     console.log('[catalog-downloader] старт обработки, jobId:', msg.jobId);
@@ -198,6 +200,14 @@
     const nums = [...map.keys()].sort((a, b) => a - b);
 
     if (!nums.length) {
+      // Частный случай: пользователь вставил ссылку на страницу магазина
+      // (/magasins/…), а не на ридер каталога — объясняем понятнее.
+      if (/^\/magasins\//.test(location.pathname)) {
+        throw new Error(
+          'страница магазина, а не каталога — вставьте ссылку на ридер ' +
+          '(/regardez/offres/…) или на список /magasins/<магазин>/catalogues-promotions'
+        );
+      }
       throw new Error('страницы не найдены — открой ридер каталога');
     }
 
@@ -275,7 +285,8 @@
     const blob = new Blob(chunks, { type: 'application/pdf' });
 
     lastBlobUrl = URL.createObjectURL(blob);
-    lastFilename = makeCatalogFilename(document.title, location.pathname);
+    // Дата действия (если каталог пришёл из ссылки-списка) попадает в имя файла.
+    lastFilename = makeCatalogFilename(document.title, location.pathname, activeSettings.validity);
 
     console.log('готово:', nums.length, 'страниц →', lastFilename);
 

@@ -53,7 +53,7 @@ ok('все файлы из манифеста на месте');
 
 // --- синтаксис JS ---
 console.log('синтаксис JS');
-for (const f of ['background.js', 'content.js', 'pdf.js', 'utils.js', 'popup.js']) {
+for (const f of ['background.js', 'content.js', 'listing.js', 'pdf.js', 'utils.js', 'popup.js']) {
   try {
     execFileSync(process.execPath, ['--check', path.join(ROOT, f)], { stdio: 'pipe' });
     ok(f);

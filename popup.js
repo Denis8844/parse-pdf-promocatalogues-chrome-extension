@@ -65,6 +65,7 @@ function updateTicks() {
 const STAGE_TEXTS = {
   idle: '',
   opening: 'Открытие страницы…',
+  listing: 'Чтение списка каталогов магазина…',
   pages: 'Загрузка страниц…',
   page: '',            // для этого этапа показываем «Страница X из Y»
   pdf: 'Создание PDF…',
@@ -77,7 +78,8 @@ const ICONS = {
   retrying: '↻',
   done: '✓',
   error: '✕',
-  cancelled: '⊘'
+  cancelled: '⊘',
+  skipped: '∅'
 };
 
 // Маленькая иконка «копировать» (inline SVG — без внешних ресурсов)
@@ -139,6 +141,32 @@ function refreshCount() {
   elStart.disabled = !links.length || (run && run.state === 'running');
 }
 
+/* ================= Черновик списка ссылок ================= */
+
+// Popup уничтожается при закрытии — вместе с содержимым textarea. Чтобы вставленные
+// ссылки не пропадали, сохраняем их в chrome.storage.local (с дебаунсом на ввод,
+// чтобы не писать в хранилище на каждое нажатие клавиши) и восстанавливаем
+// при следующем открытии: список можно дополнять по одной ссылке.
+const DRAFT_KEY = 'urlsDraft';
+let draftSaveTimer = null;
+
+function saveUrlsDraft() {
+  chrome.storage.local.set({ [DRAFT_KEY]: elUrls.value }).catch(() => {});
+}
+
+function scheduleUrlsDraftSave() {
+  if (draftSaveTimer) clearTimeout(draftSaveTimer);
+  draftSaveTimer = setTimeout(() => {
+    draftSaveTimer = null;
+    saveUrlsDraft();
+  }, 300);
+}
+
+function onUrlsInput() {
+  refreshCount();
+  scheduleUrlsDraftSave();
+}
+
 /* ================= Рендер состояния ================= */
 
 function render() {
@@ -151,15 +179,21 @@ function render() {
   const running = run.state === 'running';
   const links = run.links || [];
 
-  // Заголовок: «Каталог 2 из 5»
+  // Заголовок: «Магазин 1 из 3 · Каталоги 2 из 12 · Всего 15 из 34»
+  // (магазины и каталоги считаются раздельно; без ссылок-списков — просто
+  // «Каталог 2 из 5», как раньше)
   if (running && run.current >= 0) {
-    elCap.textContent = `Каталог ${run.current + 1} из ${links.length}`;
+    elCap.textContent = progressCaption(links, run.current);
+    elCap.title = 'Магазин — по счёту из ссылок-списков; Каталоги — внутри текущего магазина; Всего — все каталоги очереди';
   } else if (run.state === 'finished') {
     elCap.textContent = 'Обработка завершена';
+    elCap.title = '';
   } else if (run.state === 'stopped') {
     elCap.textContent = 'Обработка остановлена';
+    elCap.title = '';
   } else {
     elCap.textContent = 'Ожидание…';
+    elCap.title = '';
   }
 
   // Текущий этап
@@ -179,10 +213,17 @@ function render() {
     let within = 1;
     if (run.stage === 'page' && run.page && run.page.total) {
       within = Math.max(0, (run.page.current - 1) / run.page.total);
-    } else if (run.stage === 'pages' || run.stage === 'opening') {
+    } else if (run.stage === 'pages' || run.stage === 'opening' || run.stage === 'listing') {
       within = 0;
     }
-    percent = ((run.current + within) / links.length) * 100;
+    // Полоса — по каталогам («Всего … из …» из заголовка): ссылки-списки
+    // не считаются шагом, сбор списка полосу не двигает
+    const cp = catalogProgress(links, run.current);
+    const curIsCat = links[run.current] && !isListingUrl(links[run.current].url);
+    if (cp.total) {
+      const finished = cp.pos - (curIsCat ? 1 : 0);
+      percent = ((finished + (curIsCat ? within : 0)) / cp.total) * 100;
+    }
   } else if (run.state === 'finished' || run.state === 'stopped') {
     percent = 100;
   }
@@ -201,6 +242,7 @@ function render() {
     let html = `<div class="s-title">${run.state === 'stopped' ? 'Обработка остановлена' : 'Обработка завершена'}</div>`;
     html += `Успешно: <b>${s.ok}</b> · Ошибки: <span class="s-err"><b>${s.err}</b></span> · Всего: <b>${s.total}</b>`;
     if (s.cancelled) html += ` · Отменено: <b>${s.cancelled}</b>`;
+    if (s.skipped) html += ` · Пропущено: <b>${s.skipped}</b>`;
     // Кнопка «Повторить ошибки» — только когда очередь завершена и есть ошибки
     if (s.err > 0 && (run.state === 'finished' || run.state === 'stopped')) {
       html += `<div class="retry-row"><button id="retryBtn" class="primary">Повторить ошибки (${s.err})</button></div>`;
@@ -239,6 +281,17 @@ function renderLinkItem(link, i) {
   url.title = link.url;
   body.appendChild(url);
 
+  // Дата действия каталога («Valable: 25 sept. au 12 oct.») — у каталогов,
+  // развёрнутых из ссылки-списка; показывается всегда, в любом статусе
+  // (и во время загрузки, и после завершения).
+  if (link.dateText) {
+    const d = document.createElement('div');
+    d.className = 'date';
+    d.textContent = link.dateText;
+    d.title = 'дата действия каталога';
+    body.appendChild(d);
+  }
+
   if (link.status === 'done' && link.filename) {
     const f = document.createElement('div');
     f.className = 'file';
@@ -263,7 +316,7 @@ function renderLinkItem(link, i) {
     body.appendChild(t);
   }
 
-  if ((link.status === 'error' || link.status === 'cancelled') && link.error) {
+  if ((link.status === 'error' || link.status === 'cancelled' || link.status === 'skipped') && link.error) {
     const e = document.createElement('div');
     e.className = 'err';
     e.textContent = link.error;
@@ -372,8 +425,9 @@ const SETTINGS_GROUPS = [
       { key: 'TAB_LOAD_TIMEOUT_MS', label: 'Загрузка страницы', min: 5, max: 600, step: 1, ms: true },
       { key: 'INJECT_TIMEOUT_MS', label: 'Внедрение скрипта', min: 5, max: 300, step: 1, ms: true },
       { key: 'SEND_TIMEOUT_MS', label: 'Отправка команды старта', min: 1, max: 60, step: 1, ms: true },
-      { key: 'SETTLE_MS', label: 'Пауза после загрузки', hint: 'ждём появления панели миниатюр', min: 0, max: 30, step: 0.1, ms: true },
-      { key: 'PAGE_WAIT_TIMEOUT_MS', label: 'Поиск страниц каталога', hint: 'если панель миниатюр не появилась', min: 5, max: 600, step: 1, ms: true },
+      { key: 'SETTLE_MS', label: 'Пауза после загрузки', hint: 'после загрузки, до внедрения скрипта', min: 0, max: 30, step: 0.1, ms: true },
+      { key: 'PAGE_WAIT_TIMEOUT_MS', label: 'Поиск страниц каталога', hint: 'сколько ждать панель миниатюр', min: 5, max: 600, step: 1, ms: true },
+      { key: 'LISTING_TIMEOUT_MS', label: 'Сбор списка каталогов', hint: 'страница /magasins/…: список и «Charger plus»', min: 30, max: 600, step: 5, ms: true },
       { key: 'FETCH_TIMEOUT_MS', label: 'Загрузка одного изображения', min: 10, max: 600, step: 1, ms: true },
       { key: 'LINK_TIMEOUT_MS', label: 'Лимит на одну ссылку', hint: 'общий watchdog', min: 60, max: 7200, step: 60, ms: true },
       { key: 'DOWNLOAD_TIMEOUT_MS', label: 'Ожидание скачивания PDF', hint: 'в т.ч. диалог «Сохранить как»', min: 30, max: 3600, step: 30, ms: true }
@@ -421,7 +475,8 @@ const SETTINGS_FALLBACK = {
   NAV_RECOVERY_MAX: 3,
   JPEG_Q: 0.92,
   PAGE_WAIT_TIMEOUT_MS: 60000,
-  FETCH_TIMEOUT_MS: 120000
+  FETCH_TIMEOUT_MS: 120000,
+  LISTING_TIMEOUT_MS: 180000
 };
 
 function setStatus(text, cls) {
@@ -567,6 +622,13 @@ async function init() {
     chrome.storage.local.set({ activeTab: elActiveTab.checked }).catch(() => {});
   });
 
+  // Черновик ссылок из прошлого открытия окна: список не сбрасывается,
+  // его можно дополнить новыми ссылками
+  try {
+    const { urlsDraft } = await chrome.storage.local.get(DRAFT_KEY);
+    if (typeof urlsDraft === 'string' && urlsDraft) elUrls.value = urlsDraft;
+  } catch { /* ignore */ }
+
   // Текущее состояние очереди
   const st = await sendMessage({ type: 'GET_STATE' });
   if (st && st.run) { run = st.run; render(); }
@@ -577,7 +639,7 @@ async function init() {
   } catch { /* ignore */ }
 
   // События
-  elUrls.addEventListener('input', refreshCount);
+  elUrls.addEventListener('input', onUrlsInput);
   elStart.addEventListener('click', onStart);
   elStop.addEventListener('click', onStop);
   elLogBtn.addEventListener('click', onCopyLog);
@@ -587,6 +649,13 @@ async function init() {
   elSetReset.addEventListener('click', resetSettings);
   elUrls.addEventListener('keydown', (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') onStart();
+  });
+
+  // При закрытии окна сохраняем черновик немедленно (pagehide успевает сработать
+  // раньше смерти popup — на случай, если debounce ещё не сработал)
+  window.addEventListener('pagehide', () => {
+    if (draftSaveTimer) { clearTimeout(draftSaveTimer); draftSaveTimer = null; }
+    saveUrlsDraft();
   });
 
   // Таймер «прошло/обработка» — обновляется каждую секунду
